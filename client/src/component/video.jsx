@@ -1,12 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
-import { Video, VideoOff } from 'lucide-react';
+import { Video, VideoOff, Mic, MicOff, LogOut } from 'lucide-react';
 import * as mediasoupClient from 'mediasoup-client'
 
 export default function Meeting() {
-    const [socketId, setSocketId] = useState('');
     const [stream, setStream] = useState(null);
+    const [socketId, setSocketId] = useState('');
+    const [remoteStreams, setRemoteStreams] = useState(new Map());
     const [isDeviceReady, setIsDeviceReady] = useState(false);
+    const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+    const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+
+    const localVideoRef = useRef(null);
 
     const roomName = window.location.pathname.split('/')[2]
 
@@ -51,18 +56,10 @@ export default function Meeting() {
     let videoParams = { params };
     let consumingTransports = [];
 
-    const streamSuccess = (stream) => {
-        localVideo.srcObject = stream
-
-        audioParams = { track: stream.getAudioTracks()[0], ...audioParams };
-        videoParams = { track: stream.getVideoTracks()[0], ...videoParams };
-
-        joinRoom()
-    }
 
     const joinRoom = () => {
         socketRef.current.emit('joinRoom', { roomName }, (data) => {
-
+            console.log("in joining room function")
             console.log(`router rtpc - ${data.rtpCapabilities}`)
             rtpCapabilities = data.rtpCapabilities
             createDevice()
@@ -89,22 +86,31 @@ export default function Meeting() {
             })
     }
 
-    const goConsume = () => {
-        goConnect(false)
-    }
+    const toggleVideo = () => {
+        if (localVideoRef.current?.srcObject) {
+            const videoTrack = localVideoRef.current.srcObject.getVideoTracks()[0];
+            videoTrack.enabled = !videoTrack.enabled;
+            setIsVideoEnabled(videoTrack.enabled);
+        }
+    };
 
-    const goConnect = (producerOrConsumer) => {
-        console.log("value in go connect", producerOrConsumer);
+    const leaveRoom = () => {
+        if (localVideoRef.current?.srcObject) {
+            localVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
+        }
+        if (socketRef.current) {
+            socketRef.current.disconnect();
+        }
+        window.location.href = '/';
+    };
 
-        isProducer = producerOrConsumer
-
-        device === null ? createDevice() : goCreateTransport();
-    }
-
-    const goCreateTransport = () => {
-        console.log("in goCreateTransport", isProducer)
-        isProducer ? createSendTransport() : createRecvTransport()
-    }
+    const toggleAudio = () => {
+        if (localVideoRef.current?.srcObject) {
+            const audioTrack = localVideoRef.current.srcObject.getAudioTracks()[0];
+            audioTrack.enabled = !audioTrack.enabled;
+            setIsAudioEnabled(audioTrack.enabled);
+        }
+    };
 
     const getRtpCapabilities = async () => {
         return new Promise((resolve, reject) => {
@@ -186,7 +192,11 @@ export default function Meeting() {
 
                         // is producer exist - join room 
 
-                        if (producersExist) getProducers()
+                        if (producersExist) {
+                            getProducers()
+                        } else {
+                            console.log("producers do not exists")
+                        }
                     });
                 } catch (error) {
                     errback(error);
@@ -240,6 +250,8 @@ export default function Meeting() {
 
     const signalNewConsumerTransport = async (remoteProducerId) => {
 
+        console.log("remote producer id from create consumer", remoteProducerId)
+
         if (consumingTransports.includes(remoteProducerId)) return;
         consumingTransports.push(remoteProducerId);
 
@@ -249,7 +261,7 @@ export default function Meeting() {
                 return
             }
 
-            console.log(params)
+            console.log('params in create consumer transport ', params)
 
             const transport = device.createRecvTransport(params)
 
@@ -259,6 +271,7 @@ export default function Meeting() {
                     // see server's socket.on('transport-recv-connect', ...)
                     await socketRef.current.emit('transport-recv-connect', {
                         dtlsParameters,
+                        serverConsumerTransportId: params.id,
                     })
 
                     // Tell the transport that parameters were transmitted.
@@ -282,57 +295,59 @@ export default function Meeting() {
         }, async ({ params }) => {
             if (params.error) {
                 console.log(`error in connecting receiving transport - ${JSON.stringify(params)}`);
-                console.log('Cannot Consume');
                 return;
             }
 
-            console.log(params);
-            const consumer = await consumerTransport.consume({
-                id: params.id,
-                producerId: params.producerId,
-                kind: params.kind,
-                rtpParameters: params.rtpParameters
-            });
+            try {
+                const consumer = await consumerTransport.consume({
+                    id: params.id,
+                    producerId: params.producerId,
+                    kind: params.kind,
+                    rtpParameters: params.rtpParameters
+                });
 
-            consumerTransports = [
-                ...consumerTransports,
-                {
-                    consumerTransport,
-                    serverConsumerTransportId: params.id,
-                    producerId: remoteProducerId,
-                    consumer,
-                },
-            ]
+                consumerTransports = [
+                    ...consumerTransports,
+                    {
+                        consumerTransport,
+                        serverConsumerTransportId: params.id,
+                        producerId: remoteProducerId,
+                        consumer,
+                    },
+                ];
 
-            const newElem = document.createElement('div')
-            newElem.setAttribute('id', `td-${remoteProducerId}`)
+                const { track } = consumer;
+                const stream = new MediaStream([track]);
 
-            if (params.kind == 'audio') {
-                //append to the audio container
-                newElem.innerHTML = '<audio id="' + remoteProducerId + '" autoplay></audio>'
-            } else {
-                //append to the video container
-                newElem.setAttribute('class', 'remoteVideo')
-                newElem.innerHTML = '<video id="' + remoteProducerId + '" autoplay class="video" ></video>'
+                // Only add to remoteStreams if it's a video track
+                if (params.kind === 'video') {
+                    setRemoteStreams(prev => {
+                        const newStreams = new Map(prev);
+                        newStreams.set(remoteProducerId, stream);
+                        return newStreams;
+                    });
+                }
+
+                socketRef.current.emit('consumer-resume', {
+                    serverConsumerId: params.serverConsumerId
+                });
+            } catch (error) {
+                console.error('Error in consume transport:', error);
             }
-
-            videoContainer.appendChild(newElem)
-
-            // destructure and retrieve the video track from the producer
-            const { track } = consumer
-
-            document.getElementById(remoteProducerId).srcObject = new MediaStream([track])
-
-            // the server consumer started with media paused
-            // so we need to inform the server to resume
-            socketRef.current.emit('consumer-resume', { serverConsumerId: params.serverConsumerId })
-
-            // if (remoteVideoRef.current) {
-            //     // get element by remoteProduceerId and give that value = new MediaStream([track]);
-            //     remoteVideoRef.current.srcObject = new MediaStream([track]);
-            // }
-
         });
+    };
+
+    // Update the streamSuccess function
+    const streamSuccess = (stream) => {
+        setStream(stream);
+        if (localVideoRef.current) {
+            localVideoRef.current.srcObject = stream;
+        }
+
+        audioParams = { track: stream.getAudioTracks()[0], ...audioParams };
+        videoParams = { track: stream.getVideoTracks()[0], ...videoParams };
+
+        joinRoom();
     };
 
     useEffect(() => {
@@ -358,6 +373,8 @@ export default function Meeting() {
             });
 
             // server informs the client of a new producer just joined
+
+
             socketRef.current.on('new-producer', ({ producerId }) => signalNewConsumerTransport(producerId))
 
             socketRef.current.on('producer-closed', ({ remoteProducerId }) => {
@@ -370,8 +387,12 @@ export default function Meeting() {
                 // remove the consumer transport from the list
                 consumerTransports = consumerTransports.filter(transportData => transportData.producerId !== remoteProducerId)
 
-                // remove the video div element
-                videoContainer.removeChild(document.getElementById(`td-${remoteProducerId}`))
+                setRemoteStreams(prev => {
+                    const newStreams = new Map(prev);
+                    newStreams.delete(remoteProducerId);
+                    return newStreams;
+                });
+
             })
 
             socketRef.current.on('connect_error', (error) => {
@@ -396,54 +417,71 @@ export default function Meeting() {
     }, []);
 
     return (
-        <div className="flex flex-col h-screen bg-gray-900">
-            <div className="relative flex-1 p-6">
-                <div className="grid grid-cols-2 gap-6">
-                    <div className="relative">
+        <div className="w-full min-h-screen bg-gray-900 p-4">
+            <div className="max-w-7xl mx-auto">
+                <div className="grid grid-cols-12 gap-4">
+                    <div className="col-span-4 relative aspect-video bg-gray-800 rounded-lg overflow-hidden">
                         <video
-                            ref={videoRef}
+                            ref={localVideoRef}
                             autoPlay
                             playsInline
-                            className="w-full h-[400px] object-cover rounded-lg"
-                            style={{ transform: 'scaleX(-1)' }}
+                            className="w-full h-full object-cover transform scale-x-[-1]"
                         />
-                        {/* <div className="absolute bottom-4 right-4">
+                        <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-white text-sm">
+                            You
+                        </div>
+                        <div className="absolute bottom-2 right-2 flex gap-2">
                             <button
-                                onClick={getLocalStream}
-                                className="p-4 bg-gray-800 hover:bg-gray-700 text-white rounded-full shadow-lg transition-colors"
+                                onClick={toggleAudio}
+                                className="p-2 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors"
                             >
-                                {isVideoOn ? (
-                                    <Video className="w-6 h-6" />
+                                {isAudioEnabled ? (
+                                    <Mic className="w-5 h-5 text-white" />
                                 ) : (
-                                    <VideoOff className="w-6 h-6" />
+                                    <MicOff className="w-5 h-5 text-red-500" />
                                 )}
                             </button>
-                        </div> */}
+                            <button
+                                onClick={toggleVideo}
+                                className="p-2 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors"
+                            >
+                                {isVideoEnabled ? (
+                                    <Video className="w-5 h-5 text-white" />
+                                ) : (
+                                    <VideoOff className="w-5 h-5 text-red-500" />
+                                )}
+                            </button>
+                        </div>
                     </div>
 
-                    <div className="relative">
-                        <video
-                            ref={remoteVideoRef}
-                            autoPlay
-                            playsInline
-                            className="w-full h-[400px] object-cover rounded-lg"
-                        />
+                    <div className="col-span-8">
+                        <div className="grid grid-cols-2 gap-4">
+                            {Array.from(remoteStreams).map(([producerId, stream]) => (
+                                <div
+                                    key={producerId}
+                                    className="relative aspect-video bg-gray-800 rounded-lg overflow-hidden"
+                                >
+                                    <video
+                                        autoPlay
+                                        playsInline
+                                        className="w-full h-full object-cover transform scale-x-[-1]"
+                                        ref={el => {
+                                            if (el) el.srcObject = stream;
+                                        }}
+                                    />
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 </div>
 
-                <div className="mt-6 flex gap-2 justify-center">
-
+                <div className="fixed bottom-4 left-1/2 -translate-x-1/2">
                     <button
-                        onClick={getLocalStream}
-                        className="p-2 bg-blue-500 hover:bg-blue-600 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={leaveRoom}
+                        className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg flex items-center gap-2 transition-colors"
                     >
-                        Produce
-                    </button>
-                    <button
-                        onClick={() => goConsume(false)}
-                        className="p-2 bg-blue-500 hover:bg-blue-600 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        Consume
+                        <LogOut className="w-5 h-5" />
+                        Leave Room
                     </button>
                 </div>
             </div>

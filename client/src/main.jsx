@@ -17,7 +17,7 @@ const router = createBrowserRouter(
 
     <Route path='/' element={<App />}>
       <Route path="" element={<Home />} />
-      <Route path="videoStream" element={<VideoStream />} />
+      <Route path="videoStream/:roomName" element={<VideoStream />} />
     </Route>
 
   )
