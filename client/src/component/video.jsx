@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
-import { Video, VideoOff, Mic, MicOff, LogOut } from 'lucide-react';
+import { Video, VideoOff, Mic, MicOff, LogOut , MonitorOff , Monitor} from 'lucide-react';
 import * as mediasoupClient from 'mediasoup-client'
 
 export default function Meeting() {
@@ -10,6 +10,9 @@ export default function Meeting() {
     const [isDeviceReady, setIsDeviceReady] = useState(false);
     const [isVideoEnabled, setIsVideoEnabled] = useState(true);
     const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+    const [isScreenSharing, setIsScreenSharing] = useState(false);
+    const [screenStream, setScreenStream] = useState(null);
+    const screenProducerRef = useRef(null);
 
     const localVideoRef = useRef(null);
 
@@ -65,6 +68,72 @@ export default function Meeting() {
             createDevice()
         })
     }
+
+    const startScreenShare = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: true
+            });
+
+            setScreenStream(stream);
+            setIsScreenSharing(true);
+
+            // Create screen share producer
+            const screenTrack = stream.getVideoTracks()[0];
+
+            const screenParams = {
+                track: screenTrack,
+                encodings: [
+                    {
+                        rid: 'r0',
+                        maxBitrate: 900000,
+                        scalabilityMode: 'S1T3',
+                    }
+                ],
+                codecOptions: {
+                    videoGoogleStartBitrate: 1000
+                }
+            };
+
+            const screenProducer = await producerTransport.produce(screenParams);
+            screenProducerRef.current = screenProducer;
+
+            // Handle track stop (when user clicks "Stop sharing")
+            screenTrack.onended = () => {
+                stopScreenShare();
+            };
+
+            // Emit event to notify other participants
+            socketRef.current.emit('screen-share-started', {
+                producerId: screenProducer.id
+            });
+
+        } catch (error) {
+            console.error('Error starting screen share:', error);
+            setIsScreenSharing(false);
+        }
+    };
+
+    const stopScreenShare = async () => {
+        if (screenStream) {
+            screenStream.getTracks().forEach(track => track.stop());
+            setScreenStream(null);
+        }
+
+        if (screenProducerRef.current) {
+            screenProducerRef.current.close();
+
+            // Notify other participants that screen sharing has stopped
+            socketRef.current.emit('screen-share-stopped', {
+                producerId: screenProducerRef.current.id
+            });
+
+            screenProducerRef.current = null;
+        }
+
+        setIsScreenSharing(false);
+    };
 
     const getLocalStream = () => {
         navigator.mediaDevices.getUserMedia({
@@ -374,6 +443,31 @@ export default function Meeting() {
 
             // server informs the client of a new producer just joined
 
+            socketRef.current.on('screen-share-started', ({ producerId }) => {
+                // Handle new screen share producer like a regular producer
+                signalNewConsumerTransport(producerId);
+            });
+
+            socketRef.current.on('screen-share-stopped', ({ producerId }) => {
+                // Handle screen share stopping like a regular producer closing
+                const producerToClose = consumerTransports.find(
+                    transportData => transportData.producerId === producerId
+                );
+                if (producerToClose) {
+                    producerToClose.consumerTransport.close();
+                    producerToClose.consumer.close();
+
+                    consumerTransports = consumerTransports.filter(
+                        transportData => transportData.producerId !== producerId
+                    );
+
+                    setRemoteStreams(prev => {
+                        const newStreams = new Map(prev);
+                        newStreams.delete(producerId);
+                        return newStreams;
+                    });
+                }
+            });
 
             socketRef.current.on('new-producer', ({ producerId }) => signalNewConsumerTransport(producerId))
 
@@ -420,6 +514,7 @@ export default function Meeting() {
         <div className="w-full min-h-screen bg-gray-900 p-4">
             <div className="max-w-7xl mx-auto">
                 <div className="grid grid-cols-12 gap-4">
+                    {/* Local video */}
                     <div className="col-span-4 relative aspect-video bg-gray-800 rounded-lg overflow-hidden">
                         <video
                             ref={localVideoRef}
@@ -451,9 +546,20 @@ export default function Meeting() {
                                     <VideoOff className="w-5 h-5 text-red-500" />
                                 )}
                             </button>
+                            <button
+                                onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+                                className="p-2 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors"
+                            >
+                                {isScreenSharing ? (
+                                    <MonitorOff className="w-5 h-5 text-red-500" />
+                                ) : (
+                                    <Monitor className="w-5 h-5 text-white" />
+                                )}
+                            </button>
                         </div>
                     </div>
 
+                    {/* Remote videos and screen shares */}
                     <div className="col-span-8">
                         <div className="grid grid-cols-2 gap-4">
                             {Array.from(remoteStreams).map(([producerId, stream]) => (
@@ -475,6 +581,7 @@ export default function Meeting() {
                     </div>
                 </div>
 
+                {/* Leave room button */}
                 <div className="fixed bottom-4 left-1/2 -translate-x-1/2">
                     <button
                         onClick={leaveRoom}
