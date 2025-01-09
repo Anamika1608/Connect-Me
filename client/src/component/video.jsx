@@ -520,7 +520,7 @@ export default function Meeting() {
                             ref={localVideoRef}
                             autoPlay
                             playsInline
-                            className="w-full h-full object-cover transform scale-x-[-1]"
+                            className="w-full h-full object-cover"
                         />
                         <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-white text-sm">
                             You
