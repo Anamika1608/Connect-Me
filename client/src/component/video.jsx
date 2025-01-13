@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
-import { Video, VideoOff, Mic, MicOff, LogOut , MonitorOff , Monitor} from 'lucide-react';
+import { Video, VideoOff, Mic, MicOff, LogOut, Monitor, StopCircle } from 'lucide-react';
 import * as mediasoupClient from 'mediasoup-client'
 
 export default function Meeting() {
@@ -11,26 +11,28 @@ export default function Meeting() {
     const [isVideoEnabled, setIsVideoEnabled] = useState(true);
     const [isAudioEnabled, setIsAudioEnabled] = useState(true);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
-    const [screenStream, setScreenStream] = useState(null);
-    const screenProducerRef = useRef(null);
+    const [screenShareStream, setScreenShareStream] = useState(null);
+    const [deviceValue, setDeviceValue] = useState(null);
+
+    let device = null;
 
     const localVideoRef = useRef(null);
-
-    const roomName = window.location.pathname.split('/')[2]
-
-    let isProducer = false
-    let audioProducer
-    let videoProducer
-    let consumer
-    let device = null
-    let producerTransport = null
-    let consumerTransports = []
-    let rtpCapabilities = null
-    let mainStream = null
-
-    const videoRef = useRef(null);
-    const remoteVideoRef = useRef(null);
+    const screenShareRef = useRef(null);
     const socketRef = useRef(null);
+
+    const roomName = window.location.pathname.split('/')[2];
+
+    let isProducer = false;
+    let audioProducer;
+    let videoProducer;
+    let screenShareProducer;
+    let screenShareTransport;
+    let consumer;
+    let producerTransport = null;
+    let consumerTransports = [];
+    let rtpCapabilities = null;
+    let mainStream = null;
+
 
     let params = {
         encodings: [
@@ -68,72 +70,6 @@ export default function Meeting() {
             createDevice()
         })
     }
-
-    const startScreenShare = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
-                audio: true
-            });
-
-            setScreenStream(stream);
-            setIsScreenSharing(true);
-
-            // Create screen share producer
-            const screenTrack = stream.getVideoTracks()[0];
-
-            const screenParams = {
-                track: screenTrack,
-                encodings: [
-                    {
-                        rid: 'r0',
-                        maxBitrate: 900000,
-                        scalabilityMode: 'S1T3',
-                    }
-                ],
-                codecOptions: {
-                    videoGoogleStartBitrate: 1000
-                }
-            };
-
-            const screenProducer = await producerTransport.produce(screenParams);
-            screenProducerRef.current = screenProducer;
-
-            // Handle track stop (when user clicks "Stop sharing")
-            screenTrack.onended = () => {
-                stopScreenShare();
-            };
-
-            // Emit event to notify other participants
-            socketRef.current.emit('screen-share-started', {
-                producerId: screenProducer.id
-            });
-
-        } catch (error) {
-            console.error('Error starting screen share:', error);
-            setIsScreenSharing(false);
-        }
-    };
-
-    const stopScreenShare = async () => {
-        if (screenStream) {
-            screenStream.getTracks().forEach(track => track.stop());
-            setScreenStream(null);
-        }
-
-        if (screenProducerRef.current) {
-            screenProducerRef.current.close();
-
-            // Notify other participants that screen sharing has stopped
-            socketRef.current.emit('screen-share-stopped', {
-                producerId: screenProducerRef.current.id
-            });
-
-            screenProducerRef.current = null;
-        }
-
-        setIsScreenSharing(false);
-    };
 
     const getLocalStream = () => {
         navigator.mediaDevices.getUserMedia({
@@ -213,7 +149,9 @@ export default function Meeting() {
             });
 
             console.log('Device created with RTP Capabilities:', newDevice.rtpCapabilities);
+
             device = newDevice
+            setDeviceValue(newDevice)
             setIsDeviceReady(true);
 
             createSendTransport();
@@ -234,6 +172,8 @@ export default function Meeting() {
                 return;
             }
 
+
+
             console.log('device in createSendTrasnport', device)
 
             const transport = device.createSendTransport(params);
@@ -242,6 +182,7 @@ export default function Meeting() {
                 try {
                     await socketRef.current.emit('transport-connect', {
                         dtlsParameters,
+                        isScreenShare: false 
                     });
                     callback();
                 } catch (error) {
@@ -388,11 +329,14 @@ export default function Meeting() {
                 const { track } = consumer;
                 const stream = new MediaStream([track]);
 
-                // Only add to remoteStreams if it's a video track
+                // Handle different types of streams
                 if (params.kind === 'video') {
                     setRemoteStreams(prev => {
                         const newStreams = new Map(prev);
-                        newStreams.set(remoteProducerId, stream);
+                        newStreams.set(remoteProducerId, {
+                            stream,
+                            type: params.type || 'video' // 'video' or 'screen'
+                        });
                         return newStreams;
                     });
                 }
@@ -419,6 +363,107 @@ export default function Meeting() {
         joinRoom();
     };
 
+    const startScreenShare = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: true
+            });
+    
+            setScreenShareStream(stream);
+            setIsScreenSharing(true);
+    
+            if (screenShareRef.current) {
+                screenShareRef.current.srcObject = stream;
+            }
+    
+            if (!deviceValue) {
+                console.error('MediaSoup device not initialized');
+                return;
+            }
+    
+            // Emit startScreenShare event
+            socketRef.current.emit('startScreenShare', { roomName }, async ({ params }) => {
+                if (params.error) {
+                    console.error(params.error);
+                    return;
+                }
+    
+                screenShareTransport = deviceValue.createSendTransport(params);
+    
+                screenShareTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+                    try {
+                        await socketRef.current.emit('transport-connect', {
+                            dtlsParameters,
+                            isScreenShare: true
+                        });
+                        callback();
+                    } catch (error) {
+                        errback(error);
+                    }
+                });
+    
+                screenShareTransport.on('produce', async (parameters, callback, errback) => {
+                    try {
+                        // Ensure unique MID for screen share
+                        if (!parameters.rtpParameters.mid) {
+                            parameters.rtpParameters.mid = `screen_${Date.now()}`;
+                        }
+    
+                        await socketRef.current.emit('transport-produce', {
+                            kind: parameters.kind,
+                            rtpParameters: parameters.rtpParameters,
+                            appData: parameters.appData,
+                            isScreenShare: true
+                        }, ({ id }) => {
+                            callback({ id });
+                            screenShareProducer = id;
+                        });
+                    } catch (error) {
+                        errback(error);
+                    }
+                });
+    
+                // Produce screen share track
+                await screenShareTransport.produce({
+                    track: stream.getVideoTracks()[0],
+                    encodings: [
+                        { maxBitrate: 100000, scaleResolutionDownBy: 2 },
+                        { maxBitrate: 300000, scaleResolutionDownBy: 1 }
+                    ],
+                    appData: { mediaType: 'screen' }
+                });
+            });
+    
+            // Handle stream end
+            stream.getVideoTracks()[0].onended = () => {
+                stopScreenShare();
+            };
+        } catch (error) {
+            console.error('Error starting screen share:', error);
+            setIsScreenSharing(false);
+        }
+    };
+
+    const stopScreenShare = () => {
+        if (screenShareStream) {
+            screenShareStream.getTracks().forEach(track => track.stop());
+            setScreenShareStream(null);
+        }
+
+        if (screenShareProducer) {
+            socketRef.current.emit('stopScreenShare', { producerId: screenShareProducer });
+            screenShareProducer = null;
+        }
+
+        if (screenShareTransport) {
+            screenShareTransport.close();
+            screenShareTransport = null;
+        }
+
+        setIsScreenSharing(false);
+    };
+
     useEffect(() => {
         if (!socketRef.current) {
             console.log("Initializing socket connection...");
@@ -443,31 +488,6 @@ export default function Meeting() {
 
             // server informs the client of a new producer just joined
 
-            socketRef.current.on('screen-share-started', ({ producerId }) => {
-                // Handle new screen share producer like a regular producer
-                signalNewConsumerTransport(producerId);
-            });
-
-            socketRef.current.on('screen-share-stopped', ({ producerId }) => {
-                // Handle screen share stopping like a regular producer closing
-                const producerToClose = consumerTransports.find(
-                    transportData => transportData.producerId === producerId
-                );
-                if (producerToClose) {
-                    producerToClose.consumerTransport.close();
-                    producerToClose.consumer.close();
-
-                    consumerTransports = consumerTransports.filter(
-                        transportData => transportData.producerId !== producerId
-                    );
-
-                    setRemoteStreams(prev => {
-                        const newStreams = new Map(prev);
-                        newStreams.delete(producerId);
-                        return newStreams;
-                    });
-                }
-            });
 
             socketRef.current.on('new-producer', ({ producerId }) => signalNewConsumerTransport(producerId))
 
@@ -489,6 +509,31 @@ export default function Meeting() {
 
             })
 
+            socketRef.current.on('new-screen-share', async ({ peerId, producerId }) => {
+                console.log('New screen share detected:', producerId);
+                await signalNewConsumerTransport(producerId);
+            });
+
+            socketRef.current.on('screen-share-ended', ({ peerId, producerId }) => {
+                console.log('Screen share ended:', producerId);
+                const producerToClose = consumerTransports.find(
+                    transportData => transportData.producerId === producerId
+                );
+                if (producerToClose) {
+                    producerToClose.consumerTransport.close();
+                    producerToClose.consumer.close();
+                    consumerTransports = consumerTransports.filter(
+                        transportData => transportData.producerId !== producerId
+                    );
+                }
+
+                setRemoteStreams(prev => {
+                    const newStreams = new Map(prev);
+                    newStreams.delete(producerId);
+                    return newStreams;
+                });
+            });
+
             socketRef.current.on('connect_error', (error) => {
                 console.error("Connection error:", error);
             });
@@ -499,11 +544,13 @@ export default function Meeting() {
         }
 
         return () => {
+            if (screenShareStream) {
+                screenShareStream.getTracks().forEach(track => track.stop());
+            }
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
             }
             if (socketRef.current) {
-                console.log("Cleaning up socket connection...");
                 socketRef.current.disconnect();
                 socketRef.current = null;
             }
@@ -514,13 +561,12 @@ export default function Meeting() {
         <div className="w-full min-h-screen bg-gray-900 p-4">
             <div className="max-w-7xl mx-auto">
                 <div className="grid grid-cols-12 gap-4">
-                    {/* Local video */}
                     <div className="col-span-4 relative aspect-video bg-gray-800 rounded-lg overflow-hidden">
                         <video
                             ref={localVideoRef}
                             autoPlay
                             playsInline
-                            className="w-full h-full object-cover"
+                            className="w-full h-full object-cover transform scale-x-[-1]"
                         />
                         <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-white text-sm">
                             You
@@ -551,7 +597,7 @@ export default function Meeting() {
                                 className="p-2 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors"
                             >
                                 {isScreenSharing ? (
-                                    <MonitorOff className="w-5 h-5 text-red-500" />
+                                    <StopCircle className="w-5 h-5 text-red-500" />
                                 ) : (
                                     <Monitor className="w-5 h-5 text-white" />
                                 )}
@@ -559,29 +605,34 @@ export default function Meeting() {
                         </div>
                     </div>
 
-                    {/* Remote videos and screen shares */}
                     <div className="col-span-8">
                         <div className="grid grid-cols-2 gap-4">
-                            {Array.from(remoteStreams).map(([producerId, stream]) => (
+                            {Array.from(remoteStreams).map(([producerId, { stream, type }]) => (
                                 <div
                                     key={producerId}
-                                    className="relative aspect-video bg-gray-800 rounded-lg overflow-hidden"
+                                    className={`relative aspect-video bg-gray-800 rounded-lg overflow-hidden ${type === 'screen' ? 'col-span-2' : ''
+                                        }`}
                                 >
                                     <video
                                         autoPlay
                                         playsInline
-                                        className="w-full h-full object-cover transform scale-x-[-1]"
+                                        className={`w-full h-full ${type === 'screen' ? 'object-contain' : 'object-cover transform scale-x-[-1]'
+                                            }`}
                                         ref={el => {
                                             if (el) el.srcObject = stream;
                                         }}
                                     />
+                                    {type === 'screen' && (
+                                        <div className="absolute top-2 left-2 bg-black/50 px-2 py-1 rounded text-white text-sm">
+                                            Screen Share
+                                        </div>
+                                    )}
                                 </div>
                             ))}
                         </div>
                     </div>
                 </div>
 
-                {/* Leave room button */}
                 <div className="fixed bottom-4 left-1/2 -translate-x-1/2">
                     <button
                         onClick={leaveRoom}
@@ -595,4 +646,3 @@ export default function Meeting() {
         </div>
     );
 };
-
