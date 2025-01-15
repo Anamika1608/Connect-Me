@@ -182,7 +182,7 @@ export default function Meeting() {
                 try {
                     await socketRef.current.emit('transport-connect', {
                         dtlsParameters,
-                        isScreenShare: false 
+                        isScreenShare: false
                     });
                     callback();
                 } catch (error) {
@@ -369,28 +369,27 @@ export default function Meeting() {
                 video: true,
                 audio: true
             });
-    
+
             setScreenShareStream(stream);
             setIsScreenSharing(true);
-    
+
             if (screenShareRef.current) {
                 screenShareRef.current.srcObject = stream;
             }
-    
+
             if (!deviceValue) {
                 console.error('MediaSoup device not initialized');
                 return;
             }
-    
-            // Emit startScreenShare event
+
             socketRef.current.emit('startScreenShare', { roomName }, async ({ params }) => {
                 if (params.error) {
                     console.error(params.error);
                     return;
                 }
-    
+
                 screenShareTransport = deviceValue.createSendTransport(params);
-    
+
                 screenShareTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
                     try {
                         await socketRef.current.emit('transport-connect', {
@@ -402,14 +401,14 @@ export default function Meeting() {
                         errback(error);
                     }
                 });
-    
+
                 screenShareTransport.on('produce', async (parameters, callback, errback) => {
                     try {
                         // Ensure unique MID for screen share
                         if (!parameters.rtpParameters.mid) {
                             parameters.rtpParameters.mid = `screen_${Date.now()}`;
                         }
-    
+
                         await socketRef.current.emit('transport-produce', {
                             kind: parameters.kind,
                             rtpParameters: parameters.rtpParameters,
@@ -423,7 +422,7 @@ export default function Meeting() {
                         errback(error);
                     }
                 });
-    
+
                 // Produce screen share track
                 await screenShareTransport.produce({
                     track: stream.getVideoTracks()[0],
@@ -434,7 +433,7 @@ export default function Meeting() {
                     appData: { mediaType: 'screen' }
                 });
             });
-    
+
             // Handle stream end
             stream.getVideoTracks()[0].onended = () => {
                 stopScreenShare();
@@ -613,15 +612,27 @@ export default function Meeting() {
                                     className={`relative aspect-video bg-gray-800 rounded-lg overflow-hidden ${type === 'screen' ? 'col-span-2' : ''
                                         }`}
                                 >
-                                    <video
-                                        autoPlay
-                                        playsInline
-                                        className={`w-full h-full ${type === 'screen' ? 'object-contain' : 'object-cover transform scale-x-[-1]'
-                                            }`}
-                                        ref={el => {
-                                            if (el) el.srcObject = stream;
-                                        }}
-                                    />
+                                    {type === 'screen' ? (
+                                        <video
+                                            autoPlay
+                                            playsInline
+                                            className="w-full h-full object-contain"
+                                            style={{ transform: 'none' }} 
+                                            ref={el => {
+                                                if (el) el.srcObject = stream;
+                                            }}
+                                        />
+                                    ) : (
+                                        <video
+                                            autoPlay
+                                            playsInline
+                                            className="w-full h-full object-cover"
+                                            style={{ transform: 'scaleX(-1)' }} 
+                                            ref={el => {
+                                                if (el) el.srcObject = stream;
+                                            }}
+                                        />
+                                    )}
                                     {type === 'screen' && (
                                         <div className="absolute top-2 left-2 bg-black/50 px-2 py-1 rounded text-white text-sm">
                                             Screen Share
@@ -631,6 +642,7 @@ export default function Meeting() {
                             ))}
                         </div>
                     </div>
+
                 </div>
 
                 <div className="fixed bottom-4 left-1/2 -translate-x-1/2">
