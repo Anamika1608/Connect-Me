@@ -430,6 +430,184 @@ const mediaSoupSocketConnection = (connections) => {
             await consumer.resume()
         })
 
+        socket.on('startScreenShare', async ({ roomName }, callback) => {
+            try {
+                const router = rooms[roomName].router;
+
+                const transport = await createWebRtcTransport(router, socket.id);
+
+                addTransport(transport, roomName, false, true);  
+
+                socket.to(roomName).emit('new-screen-share-started', {
+                    peerId: socket.id
+                });
+
+                callback({
+                    params: {
+                        id: transport.id,
+                        iceParameters: transport.iceParameters,
+                        iceCandidates: transport.iceCandidates,
+                        dtlsParameters: transport.dtlsParameters,
+                        isScreenShare: true  
+                    }
+                });
+            } catch (error) {
+                console.error("Error starting screen share:", error);
+                callback({ error: error.message });
+            }
+        });
+
+
+        socket.on('consume-screen-share', async ({ rtpCapabilities, remoteProducerId }, callback) => {
+            try {
+                const { roomName } = peers[socket.id];
+                const router = rooms[roomName].router;
+
+                const consumerTransport = await createWebRtcTransport(router, socket.id);
+                addTransport(consumerTransport, roomName, true, true); 
+
+                if (router.canConsume({ producerId: remoteProducerId, rtpCapabilities })) {
+                    const consumer = await consumerTransport.consume({
+                        producerId: remoteProducerId,
+                        rtpCapabilities,
+                        paused: true,
+                    });
+
+                    consumer.on('transportclose', () => {
+                        console.log('screen share consumer transport closed');
+                    });
+
+                    consumer.on('producerclose', () => {
+                        console.log('screen share producer closed');
+                        socket.emit('screen-share-ended', { remoteProducerId });
+                        consumer.close();
+                        consumerTransport.close();
+                    });
+
+                    console.log("in consumer screen share");
+
+                    addConsumer(consumer, roomName, true);  
+
+                    callback({
+                        params: {
+                            id: consumer.id,
+                            producerId: remoteProducerId,
+                            kind: consumer.kind,
+                            rtpParameters: consumer.rtpParameters,
+                            type: 'screen-share'
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error in consume-screen-share:', error);
+                callback({ error: error.message });
+            }
+        });
+
+        socket.on('stopScreenShare', async ({ producerId }) => {
+            try {
+                const producerData = producers.find(p =>
+                    p.producer.id === producerId && p.socketId === socket.id
+                );
+
+                if (producerData) {
+                    const { roomName } = peers[socket.id];
+
+                    // Close the producer
+                    producerData.producer.close();
+
+                    // Remove the producer from our list
+                    producers = producers.filter(p => p.producer.id !== producerId);
+
+                    // Clean up associated transports
+                    const screenShareTransports = transports.filter(t =>
+                        t.socketId === socket.id && t.isScreenShare
+                    );
+
+                    // Close and clean up each transport
+                    for (const transportData of screenShareTransports) {
+                        // Close all producers on this transport
+                        const transportProducers = producers.filter(p =>
+                            p.socketId === socket.id &&
+                            p.isScreenShare &&
+                            getTransport(socket.id, true)?.id === transportData.transport.id
+                        );
+
+                        transportProducers.forEach(({ producer }) => {
+                            producer.close();
+                        });
+
+                        // Close the transport
+                        transportData.transport.close();
+
+                        // Notify peers
+                        socket.to(roomName).emit('screen-share-ended', {
+                            peerId: socket.id,
+                            producerId
+                        });
+                    }
+
+                    // Clean up transport array
+                    transports = transports.filter(t =>
+                        !(t.socketId === socket.id && t.isScreenShare)
+                    );
+
+                    producers = producers.filter(p =>
+                        !(p.socketId === socket.id && p.isScreenShare)
+                    );
+                    
+                }
+            } catch (error) {
+                console.error('Error stopping screen share:', error);
+            }
+        });
+
+        const cleanupPeerResources = async (socketId, roomName) => {
+            try {
+                // Close and remove all producers
+                const peerProducers = producers.filter(p => p.socketId === socketId);
+                for (const producerData of peerProducers) {
+                    producerData.producer.close();
+                }
+                producers = producers.filter(p => p.socketId !== socketId);
+
+                // Close and remove all consumers
+                const peerConsumers = consumers.filter(c => c.socketId === socketId);
+                for (const consumerData of peerConsumers) {
+                    consumerData.consumer.close();
+                }
+                consumers = consumers.filter(c => c.socketId !== socketId);
+
+                // Close and remove all transports
+                const peerTransports = transports.filter(t => t.socketId === socketId);
+                for (const transportData of peerTransports) {
+                    transportData.transport.close();
+                }
+                transports = transports.filter(t => t.socketId !== socketId);
+
+                // Update room peers
+                if (rooms[roomName]) {
+                    rooms[roomName].peers = rooms[roomName].peers.filter(id => id !== socketId);
+                }
+
+                // Clean up peer data
+                delete peers[socketId];
+            } catch (error) {
+                console.error('Error cleaning up peer resources:', error);
+            }
+        };
+
+        const removeItems = (items, socketId, type) => {
+            items.forEach(item => {
+                if (item.socketId === socketId) {
+                    item[type].close()
+                }
+            })
+            items = items.filter(item => item.socketId !== socketId)
+
+            return items
+        }
+
         socket.on('disconnect', () => {
             console.log('peer disconnected');
             const { roomName } = peers[socket.id] || {};
